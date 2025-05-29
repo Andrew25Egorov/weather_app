@@ -1,0 +1,72 @@
+{% extends "weather/base.html" %}
+
+{% block content %}
+    <h1 style="text-align: center; margin-bottom: 30px;">Прогноз погоды</h1>
+
+    <form method="POST" action="{% url 'get_weather' %}" style="text-align: center;">
+        {% csrf_token %}
+        <input type="text" id="city-input" name="city"
+               placeholder="Введите город"
+               list="city-suggestions"
+               style="padding: 12px; width: 70%; font-size: 1.1rem; border-radius: 8px; border: 1px solid #ccc;">
+
+        <datalist id="city-suggestions"></datalist>
+
+        <button type="submit" style="padding: 12px 24px; margin-left: 10px; font-size: 1.1rem;
+                background: #4285f4; color: white; border: none; border-radius: 8px; cursor: pointer;">
+            Поиск
+        </button>
+    </form>
+
+    {% if recent_city %}
+    <div style="text-align: center; margin-top: 20px;">
+        <p>Недавно смотрели:
+            <a href="{% url 'get_weather' %}?city={{ recent_city }}"
+               style="color: #4285f4; text-decoration: none;">
+               {{ recent_city }}
+            </a>
+        </p>
+    </div>
+    {% endif %}
+
+    {% comment %} {% if search_history %}
+    <div style="margin-top: 30px; text-align: center;">
+        <h3>История поиска:</h3>
+        <ul style="list-style: none; padding: 0;">
+            {% for city in search_history %}
+            <li>
+                <a href="{% url 'get_weather' %}?city={{ city }}"
+                   style="color: #4285f4; text-decoration: none;">
+                    {{ city }}
+                </a>
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %} {% endcomment %}
+
+
+    {% if error %}
+    <p style="color: #d32f2f; text-align: center; margin-top: 20px;">{{ error }}</p>
+    {% endif %}
+
+    <script>
+    document.getElementById('city-input').addEventListener('input', function(e) {
+        const query = e.target.value.trim();
+        if (query.length < 2) return;
+
+        fetch(`/autocomplete/?term=${encodeURIComponent(query)}`)
+            .then(response => response.json())
+            .then(data => {
+                const datalist = document.getElementById('city-suggestions');
+                datalist.innerHTML = '';
+                data.forEach(city => {
+                    const option = document.createElement('option');
+                    option.value = city;
+                    datalist.appendChild(option);
+                });
+            })
+            .catch(error => console.error('Error:', error));
+    });
+    </script>
+{% endblock %}
