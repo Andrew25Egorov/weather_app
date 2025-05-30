@@ -1,28 +1,56 @@
-{% extends "weather/base.html" %}
+<!-- templates/weather/result.html -->
+{% load weather_extras %}
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Прогноз погоды</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-blue-50 text-gray-800">
+    <div class="max-w-3xl mx-auto py-10 px-4">
+        <h1 class="text-3xl font-bold mb-4">
+            Погода: {{ weather.city }}, {{ weather.country }}
+        </h1>
 
-{% block content %}
-    <div class="city-name">
-        {{ weather.city }}{% if weather.country %}, {{ weather.country }}{% endif %}
+        <div class="bg-white shadow-md rounded-lg p-4 mb-6">
+            <p class="text-xl">
+                <span class="font-medium">Сейчас:</span>
+                {{ weather.current.temperature }}°C,
+                ветер {{ weather.current.windspeed }} м/с
+                ({{ weather.current.winddirection|wind_direction }}),
+                {{ weather.current.description }} {{ weather.current.icon }}
+            </p>
+            <p class="text-sm text-gray-500">На момент: {{ weather.current.time }}</p>
+        </div>
+
+        <h2 class="text-2xl font-semibold mb-2">Почасовой прогноз (12 часов)</h2>
+        <div class="overflow-x-auto">
+            <table class="w-full table-auto text-sm bg-white shadow rounded-lg">
+                <thead class="bg-blue-100">
+                    <tr>
+                        <th class="px-4 py-2 text-left">Время</th>
+                        <th class="px-4 py-2 text-left">Температура</th>
+                        <th class="px-4 py-2 text-left">Ветер</th>
+                        <th class="px-4 py-2 text-left">Направление</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for time, temp, wind, winddir in hourly_forecast %}
+                    <tr class="border-t">
+                        <td class="px-4 py-2">{{ time }}</td>
+                        <td class="px-4 py-2">{{ temp }}°C</td>
+                        <td class="px-4 py-2">{{ wind }} м/с</td>
+                        <td class="px-4 py-2">{{ winddir|wind_direction }}</td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="mt-6">
+            <a href="{% url 'home' %}" class="text-blue-600 hover:underline">← Назад</a>
+        </div>
     </div>
-
-    <div class="weather-icon">
-        {{ weather.current.weather_icon }}
-    </div>
-
-    <div class="temperature">
-        {{ weather.current.temperature }}°C
-    </div>
-
-    <div class="weather-desc">
-        {{ weather.current.weather_desc }}
-    </div>
-
-    <div class="current-weather">
-        Ветер: {{ weather.current.windspeed }} км/ч
-    </div>
-
-    <a href="{% url 'home' %}"
-       style="display: inline-block; margin-top: 30px; font-size: 1.2rem; color: #3498db; text-decoration: none;">
-        Назад к поиску
-    </a>
-{% endblock %}
+</body>
+</html>

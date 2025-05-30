@@ -1,34 +1,66 @@
-from django.test import TestCase, Client
+from unittest.mock import patch
+
+from django.test import Client, TestCase
 from django.urls import reverse
-from .models import CitySearch
-import json
 
 
 class WeatherAppTests(TestCase):
     def setUp(self):
         self.client = Client()
-        CitySearch.objects.create(
-            city_name='Test City', country='Test Country', latitude=0.0, longitude=0.0
-        )
 
-    def test_home_page(self):
+    def test_home_page_loads(self):
         response = self.client.get(reverse('home'))
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'Weather Forecast')
+        self.assertContains(response, 'Введите город')
 
-    def test_weather_submission(self):
-        response = self.client.post(reverse('get_weather'), {'city': 'Paris'})
-        self.assertIn(response.status_code, [200, 302])
-    # 302 если редирект при ошибке
+    def test_autocomplete_returns_data(self):
+        with patch('weather.views.requests.get') as mock_get:
+            mock_get.return_value.json.return_value = [
+                {'address': {'city': 'Москва', 'country': 'Россия'},
+                 'display_name': 'Москва, Россия'}
+            ]
+            response = self.client.get(reverse('autocomplete'),
+                                       {'term': 'Мос'})
+            self.assertEqual(response.status_code, 200)
+            self.assertJSONEqual(response.content, ["Москва, Россия"])
 
-    def test_search_history_api(self):
-        response = self.client.get(reverse('search_history_api'))
-        self.assertEqual(response.status_code, 200)
-        data = json.loads(response.content)
-        self.assertIsInstance(data, list)
+    def test_get_weather_redirects_on_invalid_city(self):
+        with patch('weather.views.get_city_coordinates', return_value=None):
+            response = self.client.get(reverse('get_weather'),
+                                       {'city': 'Неведомоград'})
+            self.assertRedirects(
+                response,
+                reverse('home')
+                + '?error=%D0%93%D0%BE%D1%80%D0%BE%D0%B4+%27'
+                '%D0%9D%D0%B5%D0%B2%D0%B5%D0%B4%D0%BE%D0%BC%D0%BE'
+                '%D0%B3%D1%80%D0%B0%D0%B4%27+%D0%BD%D0%B5+%D0%BD%D0%B0'
+                '%D0%B9%D0%B4%D0%B5%D0%BD'
+            )
 
-    def test_city_search_model(self):
-        city = CitySearch.objects.get(city_name='Test City')
-        self.assertEqual(city.country, 'Test Country')
-        city.increment_search_count()
-        self.assertEqual(city.search_count, 2)
+    def test_get_weather_success(self):
+        with patch('weather.views.get_city_coordinates') as mock_coords, \
+             patch('weather.views.fetch_weather_data') as mock_weather:
+
+            mock_coords.return_value = {
+                'latitude': 55.75,
+                'longitude': 37.61,
+                'country': 'Россия'}
+            mock_weather.return_value = {
+                'current_weather': {
+                    'temperature': 12.3,
+                    'windspeed': 4.5,
+                    'winddirection': 90,
+                    'time': '2025-05-30T12:00',
+                    'weathercode': 0
+                },
+                'hourly': {
+                    'time': ['2025-05-30T13:00'] * 12,
+                    'temperature_2m': [15.0] * 12,
+                    'windspeed_10m': [5.0] * 12,
+                    'winddirection_10m': [180] * 12
+                }
+            }
+            response = self.client.get(reverse('get_weather'),
+                                       {'city': 'Москва'})
+            self.assertEqual(response.status_code, 200)
+            self.assertContains(response, 'Погода: Москва')

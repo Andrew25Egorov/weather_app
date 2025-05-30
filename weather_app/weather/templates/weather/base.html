@@ -7,59 +7,68 @@
     <style>
         body {
             font-family: 'Arial', sans-serif;
-            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
-            min-height: 100vh;
-            margin: 0;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f7fa;
         }
-
-        .weather-container {
+        .weather-card {
             background: white;
-            border-radius: 20px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
-            padding: 40px;
-            width: 90%;
-            max-width: 600px;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .hourly-forecast {
+            display: flex;
+            overflow-x: auto;
+            gap: 15px;
+            padding: 10px 0;
+        }
+        .hour-item {
+            min-width: 80px;
             text-align: center;
-        }
-
-        .city-name {
-            font-size: 2.5rem;
-            font-weight: 700;
-            color: #2c3e50;
-            margin-bottom: 10px;
-        }
-
-        .current-weather {
-            font-size: 1.8rem;
-            margin: 20px 0;
-        }
-
-        .temperature {
-            font-size: 4rem;
-            font-weight: 700;
-            color: #e74c3c;
-            margin: 20px 0;
-        }
-
-        .weather-icon {
-            font-size: 3rem;
-            margin: 15px 0;
-        }
-
-        .weather-desc {
-            font-size: 1.5rem;
-            color: #7f8c8d;
-            margin-bottom: 30px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 8px;
         }
     </style>
 </head>
 <body>
-    <div class="weather-container">
-        {% block content %}{% endblock %}
-    </div>
+    {% block content %}{% endblock %}
+
+    <script>
+    document.getElementById('city-input')?.addEventListener('input', async function(e) {
+        const query = e.target.value.trim();
+        const datalist = document.getElementById('city-suggestions');
+
+        if (query.length < 2) {
+            datalist.innerHTML = '';
+            return;
+        }
+
+        try {
+            console.log('Sending request for:', query);
+            const response = await fetch(`/autocomplete/?term=${encodeURIComponent(query)}`);
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const data = await response.json();
+            console.log('Received data:', data);
+
+            datalist.innerHTML = '';
+            data.forEach(city => {
+                const option = document.createElement('option');
+                option.value = city;
+                datalist.appendChild(option);
+            });
+        } catch (error) {
+            console.error('Autocomplete error:', error);
+            datalist.innerHTML = '';
+        }
+    });
+    </script>
 </body>
 </html>

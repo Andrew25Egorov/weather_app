@@ -1,252 +1,191 @@
-from datetime import datetime
+from urllib.parse import quote, unquote
 
 import requests
 from django.core.cache import cache
 from django.http import JsonResponse
 from django.shortcuts import render, redirect
+from django.urls import reverse
+from django.utils.encoding import force_str
 from django.views.decorators.csrf import csrf_exempt
 
-# from django.conf import settings
-# import json
-from .constants import WEATHER_CODES
+from .constants import WEATHER_CODES, API_TIMEOUT, CACHE_TIMEOUT
 
 
 def home(request):
-    """
-    Главная страница с формой поиска.
-    Показывает последний просмотренный город и историю поиска.
-    """
-    context = {
-        'recent_city': request.COOKIES.get('recent_city', ''),
-        'search_history': request.session.get('search_history', [])[:3],
-    }
-    return render(request, 'weather/home.html', context)
+    recent_city = unquote(request.COOKIES.get('recent_city', ''))
+    error = request.GET.get('error', '')
+    return render(request, 'weather/home.html', {
+        'recent_city': recent_city,
+        'error': error
+    })
 
 
 def get_weather(request):
-    """
-    Обработчик запросов погоды. Работает с GET и POST запросами.
-    GET - для ссылки 'Recently viewed'
-    POST - для основной формы поиска
-    """
-    if request.method == 'POST':
-        city_name = request.POST.get('city', '').strip()
-    elif request.method == 'GET' and 'city' in request.GET:
-        city_name = request.GET.get('city').strip()
-    else:
+    city_name = get_city_from_request(request)
+    if not city_name:
         return redirect('home')
 
-    if not city_name:
-        return render_weather_error(request, 'Please enter a city name')
-
-    # if request.method == 'POST':
-    #     city_name = request.POST.get('city', '').strip()
-    #     if not city_name:
-    #         return redirect('home')
-
-    #     # Сохраняем в сессии
-    #     history = request.session.get('search_history', [])
-    #     if city_name not in history:
-    #         history.insert(0, city_name)
-    #         request.session['search_history'] = history[:5]
-
-    # Разделяем город и страну (если есть в autocomplete)
-    city_parts = [part.strip() for part in city_name.split(',', 1)]
-    city = city_parts[0]
-    country = city_parts[1] if len(city_parts) > 1 else ''
-
-    # Получаем координаты города
-    coords = get_city_coordinates(city)
+    coords = get_city_coordinates(city_name)
     if not coords:
-        return render_weather_error(request, f"City '{city}' not found")
+        return redirect_with_error(
+            request,
+            (f"\u0413\u043e\u0440\u043e\u0434 '{city_name}' \u043d\u0435"
+             f"\u043d\u0430\u0439\u0434\u0435\u043d")
+        )
 
-    # Добавляем страну если она была указана
-    if country:
-        coords['country'] = country
-
-    # Получаем данные о погоде
     weather_data = fetch_weather_data(coords['latitude'], coords['longitude'])
     if not weather_data:
-        return render_weather_error(request, 'Error fetching weather data')
+        return redirect_with_error(
+            request,
+            '\u041e\u0448\u0438\u0431\u043a\u0430 \u043f\u043e\u043b\u0443\
+            u0447\u0435\u043d\u0438\u044f \u0434\u0430\u043d\u043d\u044b\
+            u0445 \u043e \u043f\u043e\u0433\u043e\u0434\u0435'
+        )
 
-    # Форматируем данные для отображения
-    formatted_data = format_weather_data(
-        weather_data,
-        city_name=city,
-        country=coords.get('country', '')
-    )
+    result = format_weather_data(city_name, coords, weather_data)
 
-    # Обновляем историю поиска
-    update_search_history(request,
-                          f"{city},{coords.get('country', '')}".strip(', '))
-
-    # Сохраняем в куках последний город
     response = render(request, 'weather/result.html', {
-        'weather': formatted_data,
-        'search_history': request.session.get('search_history', [])[:5]
+        'weather': result,
+        'hourly_forecast': zip(
+            result['hourly']['time'][:12],
+            result['hourly']['temperature'][:12],
+            result['hourly']['windspeed'][:12],
+            result['hourly']['winddirection'][:12]
+        )
     })
-    response.set_cookie('recent_city', city_name, max_age=30 * 24 * 60 * 60)
+    response.set_cookie('recent_city', quote(city_name), max_age=CACHE_TIMEOUT)
     return response
 
 
 @csrf_exempt
 def autocomplete(request):
-    """
-    API для автодополнения городов.
-    Возвращает JSON с вариантами городов.
-    """
-    if 'term' in request.GET:
-        term = request.GET.get('term').strip()
-        if len(term) < 2:
-            return JsonResponse([], safe=False)
+    if 'term' not in request.GET:
+        return JsonResponse([], safe=False)
 
-        url = (f'https://geocoding-api.open-meteo.com/v1/'
-               f'search?name={term}&count=5')
-
-        try:
-            response = requests.get(url, timeout=3)
-            data = response.json()
-            suggestions = [
-                f"{city['name']}, {city.get('country', '')}"
-                for city in data.get('results', [])
-            ]
-            return JsonResponse(suggestions, safe=False)
-        except Exception:
-            return JsonResponse([], safe=False)
-
-    return JsonResponse([], safe=False)
-
-
-@csrf_exempt
-def search_history_api(request):
-    """
-    API для получения истории поиска текущего пользователя.
-    Возвращает JSON с последними 10 запросами.
-    """
-    history = request.session.get('search_history', [])
-    return JsonResponse(history[:10], safe=False)
-
-
-@csrf_exempt
-def search_stats_api(request):
-    """
-    API для получения статистики по популярным городам.
-    Возвращает JSON с городами и количеством запросов.
-    """
-    from collections import defaultdict
-    history = request.session.get('search_history', [])
-
-    stats = defaultdict(int)
-    for item in history:
-        stats[item['city']] += 1
-
-    sorted_stats = sorted(stats.items(), key=lambda x: x[1], reverse=True)
-    return JsonResponse(dict(sorted_stats[:10]))
-
-
-# Вспомогательные функции
-def fetch_weather_data(latitude, longitude):
-    """Получение данных о погоде из Open-Meteo API"""
-    url = (
-        f'https://api.open-meteo.com/v1/forecast?'
-        f'latitude={latitude}&longitude={longitude}&'
-        'current_weather=true&'
-        'hourly=temperature_2m,relativehumidity_2m,weathercode,windspeed_10m'
-    )
+    term = request.GET.get('term', '').strip()
+    if len(term) < 2:
+        return JsonResponse([], safe=False)
 
     try:
-        response = requests.get(url, timeout=5)
+        url = "https://nominatim.openstreetmap.org/search"
+        params = {
+            'q': term,
+            'format': 'json',
+            'accept-language': 'ru',
+            'addressdetails': 1,
+            'limit': 5
+        }
+        headers = {'User-Agent': 'YourWeatherApp/1.0 (your@email.com)'}
+
+        response = requests.get(url, params=params, headers=headers, timeout=5)
         response.raise_for_status()
+        data = response.json()
+
+        suggestions = []
+        for item in data:
+            address = item.get('address', {})
+            city = (
+                address.get('city')
+                or address.get('town')
+                or address.get('village')
+                or address.get('municipality')
+                or item.get('display_name', '').split(',')[0]
+            )
+            country = address.get('country', '')
+
+            if city and country:
+                suggestions.append(f"{city.strip()}, {country.strip()}")
+
+        return JsonResponse(suggestions, safe=False,
+                            json_dumps_params={'ensure_ascii': False})
+
+    except Exception as e:
+        print(f"Autocomplete error: {str(e)}")
+        return JsonResponse([],
+                            safe=False,
+                            status=500,
+                            json_dumps_params={'ensure_ascii': False})
+
+
+def get_city_from_request(request):
+    if request.method == 'POST':
+        return request.POST.get('city', '').strip()
+    elif request.method == 'GET':
+        return request.GET.get('city', '').strip()
+    return None
+
+
+def get_city_coordinates(city_name):
+    cache_key = f"coords_{city_name.lower().replace(' ', '_')}"
+    if cached := cache.get(cache_key):
+        return cached
+
+    url = (f"https://nominatim.openstreetmap.org/search?q={city_name}&format="
+           f"json&addressdetails=1&accept-language=ru")
+    headers = {'User-Agent': 'WeatherApp'}
+    try:
+        response = requests.get(url, headers=headers, timeout=API_TIMEOUT)
+        data = response.json()
+        if data:
+            coords = {
+                'latitude': float(data[0]['lat']),
+                'longitude': float(data[0]['lon']),
+                'country': data[0].get('address', {}).get('country', '')
+            }
+            cache.set(cache_key, coords, timeout=CACHE_TIMEOUT)
+            return coords
+    except Exception as e:
+        print(f"Geocoding error: {e}")
+    return None
+
+
+def fetch_weather_data(lat, lon):
+    url = (
+        f"https://api.open-meteo.com/v1/forecast?"
+        f"latitude={lat}&longitude={lon}&"
+        "current_weather=true&"
+        "hourly=temperature_2m,weathercode,windspeed_10m,winddirection_10m&"
+        "windspeed_unit=ms&timezone=auto"
+    )
+    try:
+        response = requests.get(url, timeout=API_TIMEOUT)
         return response.json()
-    except requests.RequestException as e:
-        print(f'Weather API error: {e}')
+    except Exception as e:
+        print(f"Weather API error: {e}")
         return None
 
 
-def update_search_history(request, city_name):
-    """Обновление истории поиска в сессии"""
-    if 'search_history' not in request.session:
-        request.session['search_history'] = []
-
-    history = request.session['search_history']
-
-    # Удаляем дубликаты
-    history = [item for item in history if item['city'] != city_name]
-
-    # Добавляем новый поиск
-    history.insert(0, {
-        'city': city_name,
-        'timestamp': datetime.now().isoformat()
-    })
-
-    # Сохраняем только последние 10 записей
-    request.session['search_history'] = history[:10]
-    request.session.modified = True
-
-
-def render_weather_error(request, error_message):
-    """Рендеринг страницы с ошибкой"""
-    return render(request, 'weather/home.html', {
-        'error': error_message,
-        'recent_city': request.COOKIES.get('recent_city'),
-        'search_history': request.session.get('search_history', [])[:5]
-    })
-
-
-def format_weather_data(data, city_name, country):
-    """Форматирование данных о погоде для отображения"""
-    current = data['current_weather']
-    hourly = data['hourly']
-
-    weather_info = WEATHER_CODES.get(
-        current['weathercode'],
-        {'desc': 'Unknown', 'icon': '❓'}
-    )
+def format_weather_data(city_name, coords, api_data):
+    city, country = parse_city_name(city_name)
+    current = api_data['current_weather']
+    hourly = api_data['hourly']
+    weather_info = WEATHER_CODES.get(current['weathercode'],
+                                     {'desc': 'Неизвестно', 'icon': '❓'})
 
     return {
-        'city': city_name,
-        'country': country,
+        'city': city,
+        'country': country or coords.get('country', ''),
         'current': {
-            'time': current['time'],
             'temperature': current['temperature'],
             'windspeed': current['windspeed'],
-            'weather_desc': weather_info['desc'],
-            'weather_icon': weather_info['icon'],
+            'winddirection': current['winddirection'],
+            'time': current['time'],
+            'description': weather_info['desc'],
+            'icon': weather_info['icon']
         },
         'hourly': {
-            'time': hourly['time'][:24],
-            'temperature': hourly['temperature_2m'][:24],
-            'humidity': hourly['relativehumidity_2m'][:24],
+            'time': hourly['time'],
+            'temperature': hourly['temperature_2m'],
+            'windspeed': hourly['windspeed_10m'],
+            'winddirection': hourly['winddirection_10m']
         }
     }
 
 
-def get_city_coordinates(city_name):
-    """Получение координат города через Open-Meteo Geocoding API"""
-    safe_name = city_name.lower().replace(' ', '_')
-    cache_key = f'city_coords_{safe_name}'
-    cached = cache.get(cache_key)
-    if cached:
-        return cached
+def parse_city_name(full_name):
+    parts = [p.strip() for p in full_name.split(',', 1)]
+    return (parts[0], parts[1]) if len(parts) > 1 else (parts[0], '')
 
-    url = (f'https://geocoding-api.open-meteo.com/v1/'
-           f'search?name={city_name}&count=1')
 
-    try:
-        response = requests.get(url, timeout=5)
-        data = response.json()
-
-        if data.get('results'):
-            city = data['results'][0]
-            result = {
-                'latitude': city['latitude'],
-                'longitude': city['longitude'],
-                'country': city.get('country', '')
-            }
-            cache.set(cache_key, result, timeout=60 * 60 * 24)
-            # Кэш на 1 день
-            return result
-    except Exception as e:
-        print(f'Geocoding error: {e}')
-
-    return None
+def redirect_with_error(request, error_msg):
+    return redirect(f"{reverse('home')}?error={force_str(error_msg)}")
