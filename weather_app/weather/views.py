@@ -1,22 +1,28 @@
+from datetime import datetime
 from urllib.parse import quote, unquote
 
 import requests
 from django.core.cache import cache
+from django.db.models import F
 from django.http import JsonResponse
 from django.shortcuts import render, redirect
 from django.urls import reverse
 from django.utils.encoding import force_str
+from django.utils.timezone import now
 from django.views.decorators.csrf import csrf_exempt
 
 from .constants import WEATHER_CODES, API_TIMEOUT, CACHE_TIMEOUT
+from .models import CitySearch
 
 
 def home(request):
     recent_city = unquote(request.COOKIES.get('recent_city', ''))
     error = request.GET.get('error', '')
+    show_recent_prompt = bool(recent_city)
     return render(request, 'weather/home.html', {
         'recent_city': recent_city,
-        'error': error
+        'error': error,
+        'show_recent_prompt': show_recent_prompt
     })
 
 
@@ -27,22 +33,18 @@ def get_weather(request):
 
     coords = get_city_coordinates(city_name)
     if not coords:
-        return redirect_with_error(
-            request,
-            (f"\u0413\u043e\u0440\u043e\u0434 '{city_name}' \u043d\u0435"
-             f"\u043d\u0430\u0439\u0434\u0435\u043d")
-        )
+        return redirect_with_error(request, f"Город '{city_name}' не найден")
 
     weather_data = fetch_weather_data(coords['latitude'], coords['longitude'])
     if not weather_data:
-        return redirect_with_error(
-            request,
-            '\u041e\u0448\u0438\u0431\u043a\u0430 \u043f\u043e\u043b\u0443\
-            u0447\u0435\u043d\u0438\u044f \u0434\u0430\u043d\u043d\u044b\
-            u0445 \u043e \u043f\u043e\u0433\u043e\u0434\u0435'
-        )
+        return redirect_with_error(request, 'Ошибка получения данных погоды')
 
     result = format_weather_data(city_name, coords, weather_data)
+    CitySearch.objects.update_or_create(
+        name=city_name,
+        defaults={'last_searched': now()},
+    )
+    CitySearch.objects.filter(name=city_name).update(count=F('count') + 1)
 
     response = render(request, 'weather/result.html', {
         'weather': result,
@@ -159,6 +161,23 @@ def format_weather_data(city_name, coords, api_data):
     city, country = parse_city_name(city_name)
     current = api_data['current_weather']
     hourly = api_data['hourly']
+    hourly_times = hourly['time']
+    current_time_str = (
+        datetime.fromisoformat(current['time'])
+        .strftime('%H:%M %d %B %Y г.')
+    )
+    now_time = datetime.fromisoformat(current['time'])
+    filtered_times = []
+    for i, t in enumerate(hourly_times):
+        t_dt = datetime.fromisoformat(t)
+        if t_dt >= now_time:
+            filtered_times = hourly_times[i:i + 12]
+            break
+    formatted_times = [
+        datetime.fromisoformat(t).strftime('%H:%M')
+        for t in filtered_times
+    ]
+    time_ind = hourly['time'].index(filtered_times[0])
     weather_info = WEATHER_CODES.get(current['weathercode'],
                                      {'desc': 'Неизвестно', 'icon': '❓'})
 
@@ -169,15 +188,15 @@ def format_weather_data(city_name, coords, api_data):
             'temperature': current['temperature'],
             'windspeed': current['windspeed'],
             'winddirection': current['winddirection'],
-            'time': current['time'],
+            'time': current_time_str,
             'description': weather_info['desc'],
             'icon': weather_info['icon']
         },
         'hourly': {
-            'time': hourly['time'],
-            'temperature': hourly['temperature_2m'],
-            'windspeed': hourly['windspeed_10m'],
-            'winddirection': hourly['winddirection_10m']
+            'time': formatted_times,
+            'temperature': hourly['temperature_2m'][time_ind:time_ind + 12],
+            'windspeed': hourly['windspeed_10m'][time_ind:time_ind + 12],
+            'winddirection': hourly['winddirection_10m'][time_ind:time_ind +12]
         }
     }
 
@@ -189,3 +208,12 @@ def parse_city_name(full_name):
 
 def redirect_with_error(request, error_msg):
     return redirect(f"{reverse('home')}?error={force_str(error_msg)}")
+
+
+def city_stats_api(request):
+    data = list(
+        CitySearch.objects.all()
+        .values('name', 'count')
+        .order_by('-count')
+    )
+    return JsonResponse(data, safe=False)
